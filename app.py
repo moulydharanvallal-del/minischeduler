@@ -1,8 +1,10 @@
+# app.py
 import json
 import datetime as dt
 
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 from scheduler_core import (
     run_scheduler,
@@ -204,7 +206,7 @@ with tab_bom:
         height=560,
         key="bom_editor",
     )
-    st.caption("Uses your schema. inputs_needed is comma-separated list; stepnumber controls routing order.")
+    st.caption("inputs_needed is comma-separated; stepnumber controls routing order.")
 
 with tab_cap:
     st.subheader("Work-center capacity")
@@ -226,7 +228,7 @@ with tab_rm:
         height=380,
         key="raw_editor",
     )
-    st.caption("Currently a declared list. Next optional upgrade: inventory constraints + shortage checks.")
+    st.caption("Currently a declared list. Next upgrade: inventory constraints + shortages.")
 
 
 # --------------------
@@ -282,29 +284,69 @@ with tab_results:
 
         st.divider()
 
-        # GANTT
+        # --------------------
+        # GANTT (core fig OR fallback)
+        # --------------------
         if show_chart:
             if fig is not None:
                 st.subheader("Gantt chart")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning("Gantt chart was not generated (fig is None).")
+                st.warning("Scheduler did not return a Gantt figure (fig is None). Rendering fallback Gantt from schedule…")
 
-                with st.expander("Debug Gantt"):
-                    # (1) Confirm plotly exists in this environment
+                df = to_arrow_safe_df(scheduled).copy()
+                cols_lower = [c.lower() for c in df.columns]
+
+                def pick_col(candidates):
+                    for cand in candidates:
+                        for i, c in enumerate(cols_lower):
+                            if cand == c or cand in c:
+                                return df.columns[i]
+                    return None
+
+                start_col = pick_col(["start", "start_time", "start_datetime", "start_dt", "startdate", "start_date"])
+                end_col = pick_col(["end", "end_time", "end_datetime", "end_dt", "finish", "finish_time", "enddate", "end_date"])
+                y_col = pick_col(["workcenter", "work_center", "resource", "wc", "machine", "tool"])
+                label_col = pick_col(["order_number", "order", "so", "wo", "work_order", "product", "part", "part_name"])
+
+                with st.expander("Fallback Gantt debug", expanded=False):
+                    st.write("Detected columns:", {"start": start_col, "end": end_col, "y": y_col, "label": label_col})
+                    st.write("All columns:", list(df.columns))
                     try:
                         import plotly  # noqa: F401
                         st.success("plotly import: OK")
                     except Exception as e:
                         st.error(f"plotly import failed: {e}")
 
-                    # (2) See if scheduler_core recorded a chart error
-                    if plan and isinstance(plan, dict):
-                        for k in ["chart_error", "gantt_error", "plotly_error"]:
-                            if plan.get(k):
-                                st.error(f"{k}: {plan.get(k)}")
-                        st.write("plan keys (first 60):", sorted(list(plan.keys()))[:60])
+                if start_col and end_col and y_col:
+                    df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
+                    df[end_col] = pd.to_datetime(df[end_col], errors="coerce")
+                    df = df.dropna(subset=[start_col, end_col, y_col])
 
+                    if label_col is None:
+                        label_col = y_col
+
+                    try:
+                        gantt = px.timeline(
+                            df,
+                            x_start=start_col,
+                            x_end=end_col,
+                            y=y_col,
+                            hover_data=[label_col] if label_col in df.columns else None,
+                        )
+                        gantt.update_yaxes(autorange="reversed")
+                        st.subheader("Gantt chart (fallback)")
+                        st.plotly_chart(gantt, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Fallback Gantt failed: {e}")
+                else:
+                    st.error(
+                        "Could not render fallback Gantt because start/end/workcenter-like columns were not found in the schedule output."
+                    )
+
+        # --------------------
+        # TABLES
+        # --------------------
         st.subheader("Scheduled table")
         st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=460)
 
