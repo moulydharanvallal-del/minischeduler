@@ -4,8 +4,6 @@ import datetime as dt
 
 import pandas as pd
 import streamlit as st
-
-# Plotly is used for fallback gantt
 import plotly.express as px
 
 from scheduler_core import (
@@ -35,10 +33,7 @@ div[data-testid="stTabs"] button { font-weight: 700; }
 )
 
 st.title("Mini Manufacturing Scheduler")
-st.markdown(
-    '<div class="small-muted">Edit inputs → Run scheduler → Review Gantt + tables.</div>',
-    unsafe_allow_html=True,
-)
+st.markdown('<div class="small-muted">Edit inputs → Run scheduler → Review Gantt + tables.</div>', unsafe_allow_html=True)
 st.divider()
 
 
@@ -150,68 +145,130 @@ def reset_to_defaults():
     st.session_state["fig"] = None
 
 
-def build_fallback_gantt(scheduled_rows):
+def auto_detect_numeric_time_cols(df: pd.DataFrame):
     """
-    Always-attempt fallback gantt from schedule output.
-
-    Requirements:
-    - Some column like start/start_time
-    - Some column like end/end_time
-    - Some column like workcenter/resource
+    Try to infer start/end numeric time columns.
+    - Prefer columns whose names include: start/end, in/out, input/output, begin/finish.
+    - Otherwise, try to find a pair of numeric columns where (end >= start) for most rows.
+    Returns (start_col, end_col) or (None, None).
     """
-    df = to_arrow_safe_df(scheduled_rows).copy()
-    if df.empty:
-        return None, {"error": "scheduled is empty", "columns": []}
+    if df is None or df.empty:
+        return None, None
 
     cols = list(df.columns)
     lower = [c.lower() for c in cols]
 
-    def pick_col(candidates):
-        for cand in candidates:
+    # Name-based candidates
+    start_name_cands = ["start", "begin", "in", "input", "from"]
+    end_name_cands = ["end", "finish", "out", "output", "to"]
+
+    def pick_name(cands):
+        for cand in cands:
             for i, c in enumerate(lower):
                 if c == cand or cand in c:
                     return cols[i]
         return None
 
-    start_col = pick_col(["start", "start_time", "start_datetime", "start_dt", "start_date", "startdate"])
-    end_col = pick_col(["end", "end_time", "end_datetime", "end_dt", "end_date", "enddate", "finish", "finish_time"])
-    y_col = pick_col(["workcenter", "work_center", "resource", "wc", "machine", "tool"])
-    label_col = pick_col(["order_number", "order", "so", "wo", "work_order", "product", "part", "part_name"])
+    start_col = pick_name(start_name_cands)
+    end_col = pick_name(end_name_cands)
 
-    debug = {
-        "detected": {"start": start_col, "end": end_col, "y": y_col, "label": label_col},
-        "columns": cols,
-    }
+    # If both found and numeric-ish -> done
+    if start_col and end_col:
+        s = pd.to_numeric(df[start_col], errors="coerce")
+        e = pd.to_numeric(df[end_col], errors="coerce")
+        if (s.notna().sum() > 0) and (e.notna().sum() > 0):
+            return start_col, end_col
 
-    if not (start_col and end_col and y_col):
-        debug["error"] = "Could not detect required columns (start/end/y)."
-        return None, debug
+    # Otherwise brute force numeric pair search
+    numeric_cols = []
+    for c in cols:
+        s = pd.to_numeric(df[c], errors="coerce")
+        if s.notna().mean() > 0.8:  # mostly numeric
+            numeric_cols.append(c)
 
-    # Coerce to datetime
-    df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
-    df[end_col] = pd.to_datetime(df[end_col], errors="coerce")
-    df = df.dropna(subset=[start_col, end_col, y_col])
+    best = (None, None, -1.0)
+    for i in range(len(numeric_cols)):
+        for j in range(len(numeric_cols)):
+            if i == j:
+                continue
+            a = numeric_cols[i]
+            b = numeric_cols[j]
+            s = pd.to_numeric(df[a], errors="coerce")
+            e = pd.to_numeric(df[b], errors="coerce")
+            mask = s.notna() & e.notna()
+            if mask.sum() < 5:
+                continue
+            score = (e[mask] >= s[mask]).mean()
+            if score > best[2]:
+                best = (a, b, score)
+
+    if best[2] >= 0.95:  # very likely start/end
+        return best[0], best[1]
+
+    return None, None
+
+
+def auto_detect_resource_col(df: pd.DataFrame):
+    if df is None or df.empty:
+        return None
+    cols = list(df.columns)
+    lower = [c.lower() for c in cols]
+    for cand in ["workcenter", "work_center", "resource", "wc", "machine", "tool"]:
+        for i, c in enumerate(lower):
+            if c == cand or cand in c:
+                return cols[i]
+    return None
+
+
+def to_datetime_from_numeric(series: pd.Series, base_date: dt.datetime, unit: str) -> pd.Series:
+    """
+    Convert numeric offset -> datetime using base_date and a chosen unit.
+    unit: seconds | minutes | hours | days
+    """
+    s = pd.to_numeric(series, errors="coerce")
+    if unit == "seconds":
+        return base_date + pd.to_timedelta(s, unit="s")
+    if unit == "minutes":
+        return base_date + pd.to_timedelta(s, unit="m")
+    if unit == "hours":
+        return base_date + pd.to_timedelta(s, unit="h")
+    if unit == "days":
+        return base_date + pd.to_timedelta(s, unit="D")
+    # default minutes
+    return base_date + pd.to_timedelta(s, unit="m")
+
+
+def build_numeric_gantt(df_in: pd.DataFrame, start_col: str, end_col: str, y_col: str,
+                        base_date: dt.datetime, unit: str, label_col: str | None):
+    df = df_in.copy()
+
+    # ensure numeric
+    s_num = pd.to_numeric(df[start_col], errors="coerce")
+    e_num = pd.to_numeric(df[end_col], errors="coerce")
+    df = df.loc[s_num.notna() & e_num.notna()].copy()
 
     if df.empty:
-        debug["error"] = "All rows dropped after datetime coercion (start/end not parseable)."
-        return None, debug
+        raise ValueError("No rows had numeric start/end after coercion.")
 
-    if label_col is None or label_col not in df.columns:
+    df["_start_dt"] = to_datetime_from_numeric(df[start_col], base_date, unit)
+    df["_end_dt"] = to_datetime_from_numeric(df[end_col], base_date, unit)
+
+    df = df.dropna(subset=["_start_dt", "_end_dt", y_col])
+    if df.empty:
+        raise ValueError("After building datetimes, no rows remained.")
+
+    if not label_col or label_col not in df.columns:
         label_col = y_col
 
-    try:
-        gantt = px.timeline(
-            df,
-            x_start=start_col,
-            x_end=end_col,
-            y=y_col,
-            hover_data=[label_col] if label_col in df.columns else None,
-        )
-        gantt.update_yaxes(autorange="reversed")
-        return gantt, debug
-    except Exception as e:
-        debug["error"] = f"Plotly timeline creation failed: {e}"
-        return None, debug
+    fig = px.timeline(
+        df,
+        x_start="_start_dt",
+        x_end="_end_dt",
+        y=y_col,
+        hover_data=[label_col] if label_col in df.columns else None,
+    )
+    fig.update_yaxes(autorange="reversed")
+    return fig
 
 
 ensure_session_defaults()
@@ -224,16 +281,6 @@ with st.sidebar:
     show_chart = st.toggle("Show Gantt chart", value=True)
     run = st.button("Run scheduler", type="primary", use_container_width=True)
     st.button("Reset inputs", on_click=reset_to_defaults, use_container_width=True)
-
-    with st.expander("Export inputs as JSON"):
-        st.write("Orders")
-        st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
-        st.write("BOM")
-        st.code(json.dumps(st.session_state["bom_df"].to_dict(orient="records"), indent=2))
-        st.write("Capacity")
-        st.code(json.dumps(capacity_obj_from_df(st.session_state["cap_df"]), indent=2))
-        st.write("Raw materials")
-        st.code(json.dumps(st.session_state["raw_df"].to_dict(orient="records"), indent=2))
 
 
 # --------------------
@@ -325,64 +372,88 @@ with tab_results:
     if not scheduled:
         st.info("Run the scheduler from the sidebar. Results will show here.")
     else:
-        inferred = plan.get("raw_materials_inferred", []) if plan else []
-        declared = plan.get("raw_materials", []) if plan else []
+        df_sched = to_arrow_safe_df(scheduled)
 
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3 = st.columns(3)
         m1.metric("Scheduled rows", len(scheduled))
         m2.metric("Work orders", len(work_orders) if work_orders else 0)
-        m3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
-        m4.metric("Raw materials", f"{len(declared)} declared")
+        m3.metric("Columns", len(df_sched.columns))
 
         st.divider()
 
-        # HARD check that plotly exists on Streamlit Cloud
-        with st.expander("Environment debug", expanded=False):
-            try:
-                import plotly  # noqa: F401
-                st.success("plotly import: OK")
-            except Exception as e:
-                st.error(f"plotly import failed: {e}")
-            st.write("Python:", __import__("sys").version)
-
         # --------------------
-        # GANTT (core fig OR fallback ALWAYS)
+        # GANTT (core fig OR numeric fallback)
         # --------------------
         if show_chart:
             if fig is not None:
                 st.subheader("Gantt chart")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning("Gantt chart was not generated by scheduler_core (fig is None). Trying fallback Gantt…")
+                st.warning("scheduler_core returned fig=None. Building Gantt from numeric time columns…")
 
-                fallback_fig, dbg = build_fallback_gantt(scheduled)
-                with st.expander("Fallback Gantt debug", expanded=True):
-                    st.json(dbg)
-                    st.write("Scheduled preview (first 20 rows):")
-                    st.dataframe(to_arrow_safe_df(scheduled).head(20), use_container_width=True)
+                # Auto detect numeric start/end and resource
+                auto_start, auto_end = auto_detect_numeric_time_cols(df_sched)
+                auto_y = auto_detect_resource_col(df_sched)
 
-                if fallback_fig is not None:
-                    st.subheader("Gantt chart (fallback)")
-                    st.plotly_chart(fallback_fig, use_container_width=True)
-                else:
-                    st.error("Fallback Gantt could not be rendered. See debug above for which columns were missing/invalid.")
+                with st.expander("Gantt Builder (auto + manual override)", expanded=True):
+                    st.write("Detected (auto):", {"start": auto_start, "end": auto_end, "resource": auto_y})
 
-        # --------------------
-        # TABLES
-        # --------------------
+                    cols = list(df_sched.columns)
+                    cols_none = ["(none)"] + cols
+
+                    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
+                    with c1:
+                        start_col = st.selectbox("Start (numeric) column", cols_none, index=(cols_none.index(auto_start) if auto_start in cols_none else 0))
+                    with c2:
+                        end_col = st.selectbox("End (numeric) column", cols_none, index=(cols_none.index(auto_end) if auto_end in cols_none else 0))
+                    with c3:
+                        y_col = st.selectbox("Resource / Workcenter column", cols_none, index=(cols_none.index(auto_y) if auto_y in cols_none else 0))
+                    with c4:
+                        label_col = st.selectbox("Hover label (optional)", cols_none, index=0)
+
+                    st.caption("Your example 0→100, 100→190 means these are the two columns to pick for Start/End.")
+
+                    d1, d2 = st.columns([1, 1])
+                    with d1:
+                        unit = st.selectbox("Time unit for numeric columns", ["minutes", "seconds", "hours", "days"], index=0)
+                    with d2:
+                        base = st.date_input("Base date for chart", value=dt.date.today())
+                        base_dt = dt.datetime.combine(base, dt.time(0, 0, 0))
+
+                    show_preview = st.checkbox("Show schedule preview + columns", value=False)
+                    if show_preview:
+                        st.write("Columns:", cols)
+                        st.dataframe(df_sched.head(30), use_container_width=True)
+
+                    build = st.button("Build Gantt", type="primary")
+                    if build:
+                        try:
+                            if start_col == "(none)" or end_col == "(none)" or y_col == "(none)":
+                                raise ValueError("Pick Start, End, and Resource columns.")
+                            hover = None if label_col == "(none)" else label_col
+
+                            gantt = build_numeric_gantt(
+                                df_sched,
+                                start_col=start_col,
+                                end_col=end_col,
+                                y_col=y_col,
+                                base_date=base_dt,
+                                unit=unit,
+                                label_col=hover,
+                            )
+                            st.subheader("Gantt chart (numeric fallback)")
+                            st.plotly_chart(gantt, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Gantt build failed: {e}")
+
         st.subheader("Scheduled table")
-        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=460)
+        st.dataframe(df_sched, use_container_width=True, height=520)
 
-        colA, colB = st.columns(2)
-        with colA:
-            with st.expander("Work orders"):
-                st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=360)
-        with colB:
-            with st.expander("Plan ledger"):
+        with st.expander("Work orders"):
+            st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=360)
+
+        with st.expander("Plan ledger"):
+            if plan and isinstance(plan, dict):
                 st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=360)
-
-        with st.expander("Raw materials (inferred vs declared)"):
-            st.write("**Inferred from BOM:**")
-            st.code(json.dumps(inferred, indent=2))
-            st.write("**Declared:**")
-            st.dataframe(to_arrow_safe_df(declared), use_container_width=True, height=240)
+            else:
+                st.info("No plan ledger available.")
