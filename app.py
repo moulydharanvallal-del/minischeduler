@@ -12,17 +12,39 @@ from scheduler_core import (
     DEFAULT_RAW_MATERIALS,
 )
 
+# --------------------
+# PAGE SETUP / THEME
+# --------------------
 st.set_page_config(page_title="Mini Manufacturing Scheduler", layout="wide")
 
+st.markdown(
+    """
+<style>
+/* Make it feel less like a notebook */
+.block-container { padding-top: 1.1rem; padding-bottom: 2rem; }
+h1, h2, h3 { letter-spacing: -0.02em; }
+div[data-testid="stMetric"] { border: 1px solid rgba(49, 51, 63, 0.12); padding: 12px; border-radius: 14px; }
+div[data-testid="stTabs"] button { font-weight: 650; }
+.small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.95rem; }
+hr { margin: 0.7rem 0 1rem 0; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 st.title("Mini Manufacturing Scheduler")
-st.caption("Edit inputs as tables, run the scheduler, and share the app with others.")
+st.markdown(
+    '<div class="small-muted">Edit inputs as clean tables → run scheduler → review Gantt + tables.</div>',
+    unsafe_allow_html=True,
+)
+st.divider()
 
 
+# --------------------
+# HELPERS
+# --------------------
 def to_arrow_safe_df(rows):
-    """
-    Convert list[dict] or DataFrame-like objects to a PyArrow-safe pandas DataFrame.
-    Streamlit uses PyArrow internally for st.dataframe/st.data_editor.
-    """
+    """Convert list[dict] or DataFrame to a PyArrow-safe pandas DataFrame."""
     if isinstance(rows, pd.DataFrame):
         df = rows.copy()
     else:
@@ -77,11 +99,7 @@ def capacity_obj_from_df(df: pd.DataFrame) -> dict:
 
 
 def rm_df_default(bom_default_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If DEFAULT_RAW_MATERIALS is empty, give a nicer starter:
-    - If BOM has part_type == 'RW', prefill those as raw materials.
-    Otherwise, keep empty.
-    """
+    """Prefill RM with part_type == RW if DEFAULT_RAW_MATERIALS is empty."""
     try:
         if DEFAULT_RAW_MATERIALS and len(DEFAULT_RAW_MATERIALS) > 0:
             return pd.DataFrame(DEFAULT_RAW_MATERIALS)
@@ -102,33 +120,79 @@ def rm_df_default(bom_default_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(columns=["part"])
 
 
-with st.sidebar:
-    st.header("Run")
-    show_chart = st.checkbox("Show Gantt chart", value=True)
-    run = st.button("Run scheduler", type="primary")
-
-tab_inputs, tab_results, tab_share = st.tabs(["Inputs", "Results", "How to share"])
-
-# --------------------
-# INPUTS TAB (CLEAN TABLES)
-# --------------------
-with tab_inputs:
-    # Build default dataframes (and keep them in session_state so they persist)
+def ensure_session_defaults():
     if "orders_df" not in st.session_state:
         st.session_state["orders_df"] = pd.DataFrame(DEFAULT_ORDERS)
-
     if "bom_df" not in st.session_state:
         st.session_state["bom_df"] = pd.DataFrame(DEFAULT_BOM)
-
     if "cap_df" not in st.session_state:
         st.session_state["cap_df"] = capacity_df_from_obj(DEFAULT_CAPACITY)
-
     if "raw_df" not in st.session_state:
         st.session_state["raw_df"] = rm_df_default(st.session_state["bom_df"])
+    if "scheduled" not in st.session_state:
+        st.session_state["scheduled"] = None
+    if "work_orders" not in st.session_state:
+        st.session_state["work_orders"] = None
+    if "plan" not in st.session_state:
+        st.session_state["plan"] = None
+    if "fig" not in st.session_state:
+        st.session_state["fig"] = None
 
-    colL, colR = st.columns([1.2, 1])
 
-    with colL:
+ensure_session_defaults()
+
+
+def reset_to_defaults():
+    st.session_state["orders_df"] = pd.DataFrame(DEFAULT_ORDERS)
+    st.session_state["bom_df"] = pd.DataFrame(DEFAULT_BOM)
+    st.session_state["cap_df"] = capacity_df_from_obj(DEFAULT_CAPACITY)
+    st.session_state["raw_df"] = rm_df_default(st.session_state["bom_df"])
+    st.session_state["scheduled"] = None
+    st.session_state["work_orders"] = None
+    st.session_state["plan"] = None
+    st.session_state["fig"] = None
+
+
+# --------------------
+# SIDEBAR CONTROLS
+# --------------------
+with st.sidebar:
+    st.header("Controls")
+    show_chart = st.toggle("Show Gantt chart", value=True)
+    st.caption("Tip: start with defaults, then tweak capacity and due dates.")
+    run = st.button("Run scheduler", type="primary", use_container_width=True)
+    st.button("Reset inputs to defaults", on_click=reset_to_defaults, use_container_width=True)
+
+    with st.expander("Advanced: export JSON"):
+        st.write("Orders")
+        st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
+        st.write("BOM")
+        st.code(json.dumps(st.session_state["bom_df"].to_dict(orient="records"), indent=2))
+        st.write("Capacity")
+        st.code(json.dumps(capacity_obj_from_df(st.session_state["cap_df"]), indent=2))
+        st.write("Raw materials")
+        st.code(json.dumps(st.session_state["raw_df"].to_dict(orient="records"), indent=2))
+
+
+# --------------------
+# MAIN TABS
+# --------------------
+tab_inputs, tab_results = st.tabs(["⚙️ Inputs", "📈 Results"])
+
+
+# --------------------
+# INPUTS (WITH SUB-TABS)
+# --------------------
+with tab_inputs:
+    st.markdown("### Inputs")
+    st.markdown('<div class="small-muted">Each tab is an editable table. Add/delete rows like a spreadsheet.</div>', unsafe_allow_html=True)
+    st.divider()
+
+    sub_orders, sub_bom, sub_cap, sub_rm = st.tabs(
+        ["🧾 Orders", "🧩 BOM / Routing", "🏭 Capacity", "🧱 Raw Materials"]
+    )
+
+    with sub_orders:
         st.subheader("Customer orders")
         st.session_state["orders_df"] = st.data_editor(
             to_arrow_safe_df(st.session_state["orders_df"]),
@@ -136,49 +200,40 @@ with tab_inputs:
             num_rows="dynamic",
             key="orders_editor",
         )
+        st.caption("Columns expected: order_number, customer, product, quantity, due_date (YYYY-MM-DD).")
 
+    with sub_bom:
         st.subheader("BOM / routing data")
         st.session_state["bom_df"] = st.data_editor(
             to_arrow_safe_df(st.session_state["bom_df"]),
             use_container_width=True,
             num_rows="dynamic",
-            height=420,
+            height=520,
             key="bom_editor",
         )
+        st.caption("Uses your schema: part_name, inputs_needed (comma-separated), stepnumber, workcenter, batchsize, cycletime, etc.")
 
-    with colR:
+    with sub_cap:
         st.subheader("Work-center capacity")
         st.session_state["cap_df"] = st.data_editor(
             to_arrow_safe_df(st.session_state["cap_df"]),
             use_container_width=True,
             num_rows="dynamic",
-            height=260,
+            height=360,
             key="cap_editor",
         )
+        st.caption("Capacity is number of parallel tools/resources available per workcenter.")
 
+    with sub_rm:
         st.subheader("Raw materials")
         st.session_state["raw_df"] = st.data_editor(
             to_arrow_safe_df(st.session_state["raw_df"]),
             use_container_width=True,
             num_rows="dynamic",
-            height=220,
+            height=320,
             key="raw_editor",
         )
-
-        st.info("Tip: edit like a spreadsheet. Use the Advanced section only if you want raw JSON.")
-
-    with st.expander("Advanced: view / paste JSON"):
-        st.write("Customer orders JSON")
-        st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
-
-        st.write("BOM JSON")
-        st.code(json.dumps(st.session_state["bom_df"].to_dict(orient="records"), indent=2))
-
-        st.write("Capacity JSON")
-        st.code(json.dumps(capacity_obj_from_df(st.session_state["cap_df"]), indent=2))
-
-        st.write("Raw materials JSON")
-        st.code(json.dumps(st.session_state["raw_df"].to_dict(orient="records"), indent=2))
+        st.caption("Right now this is a declared list. Next step (optional) is inventory/shortage constraints.")
 
 
 # --------------------
@@ -212,7 +267,7 @@ if run:
 
 
 # --------------------
-# RESULTS TAB
+# RESULTS
 # --------------------
 with tab_results:
     scheduled = st.session_state.get("scheduled")
@@ -221,56 +276,42 @@ with tab_results:
     fig = st.session_state.get("fig")
 
     if not scheduled:
-        st.warning("Run the scheduler from the sidebar to see results.")
+        st.info("Run the scheduler from the sidebar to see results.")
     else:
-        c1, c2, c3 = st.columns(3)
+        # Top metrics bar
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
         c1.metric("Scheduled rows", len(scheduled))
         c2.metric("Work orders", len(work_orders) if work_orders else 0)
         c3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
 
         inferred = plan.get("raw_materials_inferred", []) if plan else []
         declared = plan.get("raw_materials", []) if plan else []
-        st.caption(f"Raw materials — inferred from BOM: {len(inferred)} | declared: {len(declared)}")
+        c4.metric("Raw materials", f"{len(declared)} declared")
 
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
+        st.divider()
 
-        with st.expander("Raw materials (inferred vs declared)"):
+        # Gantt
+        if show_chart:
+            if fig is not None:
+                st.subheader("Gantt chart")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Gantt chart was not generated (fig is None). If you expect one, check scheduler_core chart generation + Plotly dependency.")
+
+        # Tables
+        st.subheader("Scheduled table")
+        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=440)
+
+        colA, colB = st.columns(2)
+        with colA:
+            with st.expander("Work orders", expanded=False):
+                st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=360)
+        with colB:
+            with st.expander("Plan ledger", expanded=False):
+                st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=360)
+
+        with st.expander("Raw materials (inferred vs declared)", expanded=False):
             st.write("**Inferred from BOM:**")
             st.code(json.dumps(inferred, indent=2))
             st.write("**Declared:**")
-            st.dataframe(to_arrow_safe_df(declared), use_container_width=True, height=220)
-
-        st.subheader("Scheduled table")
-        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=360)
-
-        with st.expander("Work orders"):
-            st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=300)
-
-        with st.expander("Plan ledger"):
-            st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=300)
-
-
-# --------------------
-# SHARE TAB
-# --------------------
-with tab_share:
-    st.subheader("Share options (lightweight)")
-    st.markdown(
-        "**Option A (easiest): Streamlit Community Cloud**\n"
-        "1. Put these files in a GitHub repo\n"
-        "2. In Streamlit Cloud, deploy `app.py`\n"
-        "3. Share the URL\n\n"
-        "**Option B (internal): run locally**\n"
-        "```bash\n"
-        "python -m venv .venv\n"
-        "source .venv/bin/activate\n"
-        "pip install -r requirements.txt\n"
-        "streamlit run app.py\n"
-        "```\n\n"
-        "**Option C (single binary): PyInstaller**\n"
-        "```bash\n"
-        "pip install pyinstaller\n"
-        "pyinstaller --onefile --noconsole app.py\n"
-        "```"
-    )
+            st.dataframe(to_arrow_safe_df(declared), use_container_width=True, height=240)
