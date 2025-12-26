@@ -4,6 +4,8 @@ import datetime as dt
 
 import pandas as pd
 import streamlit as st
+
+# Plotly is used for fallback gantt
 import plotly.express as px
 
 from scheduler_core import (
@@ -27,7 +29,6 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 div[data-testid="stMetric"] { border: 1px solid rgba(49, 51, 63, 0.14); padding: 12px; border-radius: 14px; }
 div[data-testid="stTabs"] button { font-weight: 700; }
 .small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.95rem; }
-hr { margin: 0.6rem 0 1rem 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -35,7 +36,7 @@ hr { margin: 0.6rem 0 1rem 0; }
 
 st.title("Mini Manufacturing Scheduler")
 st.markdown(
-    '<div class="small-muted">Edit tables → Run scheduler → Review Gantt + schedule tables.</div>',
+    '<div class="small-muted">Edit inputs → Run scheduler → Review Gantt + tables.</div>',
     unsafe_allow_html=True,
 )
 st.divider()
@@ -88,8 +89,7 @@ def capacity_obj_from_df(df: pd.DataFrame) -> dict:
         return {}
 
     out = {}
-    df2 = df.copy()
-    df2 = df2.dropna(subset=["workcenter"])
+    df2 = df.copy().dropna(subset=["workcenter"])
     for _, r in df2.iterrows():
         wc = str(r.get("workcenter", "")).strip()
         if not wc:
@@ -103,9 +103,7 @@ def capacity_obj_from_df(df: pd.DataFrame) -> dict:
 
 
 def rm_df_default(bom_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If DEFAULT_RAW_MATERIALS is empty, prefill RM with BOM rows where part_type == RW.
-    """
+    """If DEFAULT_RAW_MATERIALS is empty, prefill RM with BOM rows where part_type == RW."""
     try:
         if DEFAULT_RAW_MATERIALS and len(DEFAULT_RAW_MATERIALS) > 0:
             return pd.DataFrame(DEFAULT_RAW_MATERIALS)
@@ -123,20 +121,16 @@ def rm_df_default(bom_df: pd.DataFrame) -> pd.DataFrame:
                 return pd.DataFrame([{"part": p} for p in sorted(set(rw))])
     except Exception:
         pass
-
     return pd.DataFrame(columns=["part"])
 
 
 def ensure_session_defaults():
     if "orders_df" not in st.session_state:
         st.session_state["orders_df"] = pd.DataFrame(DEFAULT_ORDERS)
-
     if "bom_df" not in st.session_state:
         st.session_state["bom_df"] = pd.DataFrame(DEFAULT_BOM)
-
     if "cap_df" not in st.session_state:
         st.session_state["cap_df"] = capacity_df_from_obj(DEFAULT_CAPACITY)
-
     if "raw_df" not in st.session_state:
         st.session_state["raw_df"] = rm_df_default(st.session_state["bom_df"])
 
@@ -156,8 +150,71 @@ def reset_to_defaults():
     st.session_state["fig"] = None
 
 
-ensure_session_defaults()
+def build_fallback_gantt(scheduled_rows):
+    """
+    Always-attempt fallback gantt from schedule output.
 
+    Requirements:
+    - Some column like start/start_time
+    - Some column like end/end_time
+    - Some column like workcenter/resource
+    """
+    df = to_arrow_safe_df(scheduled_rows).copy()
+    if df.empty:
+        return None, {"error": "scheduled is empty", "columns": []}
+
+    cols = list(df.columns)
+    lower = [c.lower() for c in cols]
+
+    def pick_col(candidates):
+        for cand in candidates:
+            for i, c in enumerate(lower):
+                if c == cand or cand in c:
+                    return cols[i]
+        return None
+
+    start_col = pick_col(["start", "start_time", "start_datetime", "start_dt", "start_date", "startdate"])
+    end_col = pick_col(["end", "end_time", "end_datetime", "end_dt", "end_date", "enddate", "finish", "finish_time"])
+    y_col = pick_col(["workcenter", "work_center", "resource", "wc", "machine", "tool"])
+    label_col = pick_col(["order_number", "order", "so", "wo", "work_order", "product", "part", "part_name"])
+
+    debug = {
+        "detected": {"start": start_col, "end": end_col, "y": y_col, "label": label_col},
+        "columns": cols,
+    }
+
+    if not (start_col and end_col and y_col):
+        debug["error"] = "Could not detect required columns (start/end/y)."
+        return None, debug
+
+    # Coerce to datetime
+    df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
+    df[end_col] = pd.to_datetime(df[end_col], errors="coerce")
+    df = df.dropna(subset=[start_col, end_col, y_col])
+
+    if df.empty:
+        debug["error"] = "All rows dropped after datetime coercion (start/end not parseable)."
+        return None, debug
+
+    if label_col is None or label_col not in df.columns:
+        label_col = y_col
+
+    try:
+        gantt = px.timeline(
+            df,
+            x_start=start_col,
+            x_end=end_col,
+            y=y_col,
+            hover_data=[label_col] if label_col in df.columns else None,
+        )
+        gantt.update_yaxes(autorange="reversed")
+        return gantt, debug
+    except Exception as e:
+        debug["error"] = f"Plotly timeline creation failed: {e}"
+        return None, debug
+
+
+ensure_session_defaults()
 
 # --------------------
 # SIDEBAR
@@ -165,11 +222,10 @@ ensure_session_defaults()
 with st.sidebar:
     st.header("Controls")
     show_chart = st.toggle("Show Gantt chart", value=True)
-
     run = st.button("Run scheduler", type="primary", use_container_width=True)
     st.button("Reset inputs", on_click=reset_to_defaults, use_container_width=True)
 
-    with st.expander("Advanced: export current inputs as JSON"):
+    with st.expander("Export inputs as JSON"):
         st.write("Orders")
         st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
         st.write("BOM")
@@ -181,7 +237,7 @@ with st.sidebar:
 
 
 # --------------------
-# FLATTENED MAIN TABS
+# FLATTENED TABS
 # --------------------
 tab_orders, tab_bom, tab_cap, tab_rm, tab_results = st.tabs(
     ["🧾 Orders", "🧩 BOM / Routing", "🏭 Capacity", "🧱 Raw Materials", "📈 Results"]
@@ -195,7 +251,6 @@ with tab_orders:
         num_rows="dynamic",
         key="orders_editor",
     )
-    st.caption("Expected fields: order_number, customer, product, quantity, due_date (YYYY-MM-DD).")
 
 with tab_bom:
     st.subheader("BOM / routing data")
@@ -206,7 +261,6 @@ with tab_bom:
         height=560,
         key="bom_editor",
     )
-    st.caption("inputs_needed is comma-separated; stepnumber controls routing order.")
 
 with tab_cap:
     st.subheader("Work-center capacity")
@@ -217,7 +271,6 @@ with tab_cap:
         height=420,
         key="cap_editor",
     )
-    st.caption("Capacity is parallel tools per workcenter (integer).")
 
 with tab_rm:
     st.subheader("Raw materials")
@@ -228,7 +281,6 @@ with tab_rm:
         height=380,
         key="raw_editor",
     )
-    st.caption("Currently a declared list. Next upgrade: inventory constraints + shortages.")
 
 
 # --------------------
@@ -284,65 +336,36 @@ with tab_results:
 
         st.divider()
 
+        # HARD check that plotly exists on Streamlit Cloud
+        with st.expander("Environment debug", expanded=False):
+            try:
+                import plotly  # noqa: F401
+                st.success("plotly import: OK")
+            except Exception as e:
+                st.error(f"plotly import failed: {e}")
+            st.write("Python:", __import__("sys").version)
+
         # --------------------
-        # GANTT (core fig OR fallback)
+        # GANTT (core fig OR fallback ALWAYS)
         # --------------------
         if show_chart:
             if fig is not None:
                 st.subheader("Gantt chart")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning("Scheduler did not return a Gantt figure (fig is None). Rendering fallback Gantt from schedule…")
+                st.warning("Gantt chart was not generated by scheduler_core (fig is None). Trying fallback Gantt…")
 
-                df = to_arrow_safe_df(scheduled).copy()
-                cols_lower = [c.lower() for c in df.columns]
+                fallback_fig, dbg = build_fallback_gantt(scheduled)
+                with st.expander("Fallback Gantt debug", expanded=True):
+                    st.json(dbg)
+                    st.write("Scheduled preview (first 20 rows):")
+                    st.dataframe(to_arrow_safe_df(scheduled).head(20), use_container_width=True)
 
-                def pick_col(candidates):
-                    for cand in candidates:
-                        for i, c in enumerate(cols_lower):
-                            if cand == c or cand in c:
-                                return df.columns[i]
-                    return None
-
-                start_col = pick_col(["start", "start_time", "start_datetime", "start_dt", "startdate", "start_date"])
-                end_col = pick_col(["end", "end_time", "end_datetime", "end_dt", "finish", "finish_time", "enddate", "end_date"])
-                y_col = pick_col(["workcenter", "work_center", "resource", "wc", "machine", "tool"])
-                label_col = pick_col(["order_number", "order", "so", "wo", "work_order", "product", "part", "part_name"])
-
-                with st.expander("Fallback Gantt debug", expanded=False):
-                    st.write("Detected columns:", {"start": start_col, "end": end_col, "y": y_col, "label": label_col})
-                    st.write("All columns:", list(df.columns))
-                    try:
-                        import plotly  # noqa: F401
-                        st.success("plotly import: OK")
-                    except Exception as e:
-                        st.error(f"plotly import failed: {e}")
-
-                if start_col and end_col and y_col:
-                    df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
-                    df[end_col] = pd.to_datetime(df[end_col], errors="coerce")
-                    df = df.dropna(subset=[start_col, end_col, y_col])
-
-                    if label_col is None:
-                        label_col = y_col
-
-                    try:
-                        gantt = px.timeline(
-                            df,
-                            x_start=start_col,
-                            x_end=end_col,
-                            y=y_col,
-                            hover_data=[label_col] if label_col in df.columns else None,
-                        )
-                        gantt.update_yaxes(autorange="reversed")
-                        st.subheader("Gantt chart (fallback)")
-                        st.plotly_chart(gantt, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Fallback Gantt failed: {e}")
+                if fallback_fig is not None:
+                    st.subheader("Gantt chart (fallback)")
+                    st.plotly_chart(fallback_fig, use_container_width=True)
                 else:
-                    st.error(
-                        "Could not render fallback Gantt because start/end/workcenter-like columns were not found in the schedule output."
-                    )
+                    st.error("Fallback Gantt could not be rendered. See debug above for which columns were missing/invalid.")
 
         # --------------------
         # TABLES
