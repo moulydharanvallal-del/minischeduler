@@ -27,9 +27,8 @@ def _parse_json(name: str, txt: str):
 
 def to_arrow_safe_df(rows):
     """
-    Streamlit's st.dataframe uses PyArrow under the hood.
-    PyArrow can't serialize some Python objects (timedelta, dict/list objects, mixed types).
-    This function converts common problematic values into Arrow-safe primitives.
+    Convert list[dict] to a PyArrow-safe pandas DataFrame
+    (Streamlit uses PyArrow internally for st.dataframe).
     """
     df = pd.DataFrame(rows or [])
     if df.empty:
@@ -37,18 +36,14 @@ def to_arrow_safe_df(rows):
 
     def fix_val(v):
         if isinstance(v, dt.timedelta):
-            # represent as hours (float)
             return v.total_seconds() / 3600.0
-
         if isinstance(v, (dt.datetime, dt.date)):
             return v.isoformat()
-
         if isinstance(v, (dict, list, tuple, set)):
             try:
                 return json.dumps(v, default=str)
             except Exception:
                 return str(v)
-
         return v
 
     for c in df.columns:
@@ -63,9 +58,12 @@ with st.sidebar:
     show_chart = st.checkbox("Show Gantt chart", value=True)
     run = st.button("Run scheduler", type="primary")
 
-tab1, tab2, tab3 = st.tabs(["Inputs", "Results", "How to share"])
+tab_inputs, tab_results, tab_share = st.tabs(["Inputs", "Results", "How to share"])
 
-with tab1:
+# --------------------
+# INPUTS TAB
+# --------------------
+with tab_inputs:
     st.subheader("Customer orders (JSON list)")
     orders_text = st.text_area(
         "orders_json",
@@ -100,6 +98,10 @@ with tab1:
 
     st.info("Tip: keep keys/fields consistent. If JSON is invalid, the run will fail with a helpful error.")
 
+
+# --------------------
+# RUN SCHEDULER
+# --------------------
 if run:
     try:
         orders = _parse_json("Orders", orders_text)
@@ -120,12 +122,19 @@ if run:
         st.session_state["work_orders"] = work_orders
         st.session_state["plan"] = plan
         st.session_state["fig"] = fig
-        st.success(f"Done. Scheduled runs: {len(scheduled)} | Work orders: {len(work_orders)}")
+
+        st.success(
+            f"Done. Scheduled runs: {len(scheduled)} | Work orders: {len(work_orders)}"
+        )
 
     except Exception as e:
         st.error(str(e))
 
-with tab2:
+
+# --------------------
+# RESULTS TAB
+# --------------------
+with tab_results:
     scheduled = st.session_state.get("scheduled")
     work_orders = st.session_state.get("work_orders")
     plan = st.session_state.get("plan")
@@ -136,33 +145,46 @@ with tab2:
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("Scheduled rows", len(scheduled))
-        c2.metric("Work orders", len(work_orders) if work_orders else 0)
-        c3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
+        c2.metric("Work orders", len(work_orders))
+        c3.metric("Ledger rows", len(plan.get("ledger", [])))
 
-        inferred = plan.get("raw_materials_inferred", []) if plan else []
-        declared = plan.get("raw_materials", []) if plan else []
-        st.caption(f"Raw materials — inferred from BOM: {len(inferred)} | declared: {len(declared)}")
+        inferred = plan.get("raw_materials_inferred", [])
+        declared = plan.get("raw_materials", [])
+        st.caption(
+            f"Raw materials — inferred from BOM: {len(inferred)} | declared: {len(declared)}"
+        )
 
         if fig is not None:
             st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Raw materials (inferred vs declared)"):
-            if plan:
-                st.write("**Inferred from BOM (consumed but never produced):**")
-                st.code(json.dumps(plan.get("raw_materials_inferred", []), indent=2))
-                st.write("**Declared (from Raw Materials tab):**")
-                st.dataframe(to_arrow_safe_df(plan.get("raw_materials", [])), use_container_width=True, height=200)
+            st.write("**Inferred from BOM:**")
+            st.code(json.dumps(inferred, indent=2))
+            st.write("**Declared:**")
+            st.dataframe(to_arrow_safe_df(declared), use_container_width=True)
 
         st.subheader("Scheduled table")
         st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=320)
 
         with st.expander("Work orders"):
-            st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=260)
+            st.dataframe(
+                to_arrow_safe_df(work_orders),
+                use_container_width=True,
+                height=260,
+            )
 
         with st.expander("Plan ledger"):
-            st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=260)
+            st.dataframe(
+                to_arrow_safe_df(plan.get("ledger", [])),
+                use_container_width=True,
+                height=260,
+            )
 
-with tab3:
+
+# --------------------
+# SHARE TAB
+# --------------------
+with tab_share:
     st.subheader("Share options (lightweight)")
     st.markdown(
         """
@@ -174,6 +196,6 @@ with tab3:
 **Option B (internal): run locally**
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
