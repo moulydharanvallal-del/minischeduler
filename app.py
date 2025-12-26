@@ -13,20 +13,19 @@ from scheduler_core import (
 )
 
 # --------------------
-# PAGE SETUP / THEME
+# PAGE SETUP / STYLE
 # --------------------
 st.set_page_config(page_title="Mini Manufacturing Scheduler", layout="wide")
 
 st.markdown(
     """
 <style>
-/* Make it feel less like a notebook */
-.block-container { padding-top: 1.1rem; padding-bottom: 2rem; }
+.block-container { padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1400px; }
 h1, h2, h3 { letter-spacing: -0.02em; }
-div[data-testid="stMetric"] { border: 1px solid rgba(49, 51, 63, 0.12); padding: 12px; border-radius: 14px; }
-div[data-testid="stTabs"] button { font-weight: 650; }
+div[data-testid="stMetric"] { border: 1px solid rgba(49, 51, 63, 0.14); padding: 12px; border-radius: 14px; }
+div[data-testid="stTabs"] button { font-weight: 700; }
 .small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.95rem; }
-hr { margin: 0.7rem 0 1rem 0; }
+hr { margin: 0.6rem 0 1rem 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -34,7 +33,7 @@ hr { margin: 0.7rem 0 1rem 0; }
 
 st.title("Mini Manufacturing Scheduler")
 st.markdown(
-    '<div class="small-muted">Edit inputs as clean tables → run scheduler → review Gantt + tables.</div>',
+    '<div class="small-muted">Edit tables → Run scheduler → Review Gantt + schedule tables.</div>',
     unsafe_allow_html=True,
 )
 st.divider()
@@ -44,7 +43,7 @@ st.divider()
 # HELPERS
 # --------------------
 def to_arrow_safe_df(rows):
-    """Convert list[dict] or DataFrame to a PyArrow-safe pandas DataFrame."""
+    """Convert list[dict] or DataFrame to a PyArrow-safe DataFrame for Streamlit."""
     if isinstance(rows, pd.DataFrame):
         df = rows.copy()
     else:
@@ -81,11 +80,14 @@ def capacity_df_from_obj(cap_obj: dict) -> pd.DataFrame:
 
 
 def capacity_obj_from_df(df: pd.DataFrame) -> dict:
-    df2 = df.copy()
-    if "workcenter" not in df2.columns or "capacity" not in df2.columns:
+    if df is None or df.empty:
         return {}
-    df2 = df2.dropna(subset=["workcenter"])
+    if "workcenter" not in df.columns or "capacity" not in df.columns:
+        return {}
+
     out = {}
+    df2 = df.copy()
+    df2 = df2.dropna(subset=["workcenter"])
     for _, r in df2.iterrows():
         wc = str(r.get("workcenter", "")).strip()
         if not wc:
@@ -98,15 +100,17 @@ def capacity_obj_from_df(df: pd.DataFrame) -> dict:
     return out
 
 
-def rm_df_default(bom_default_df: pd.DataFrame) -> pd.DataFrame:
-    """Prefill RM with part_type == RW if DEFAULT_RAW_MATERIALS is empty."""
+def rm_df_default(bom_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    If DEFAULT_RAW_MATERIALS is empty, prefill RM with BOM rows where part_type == RW.
+    """
     try:
         if DEFAULT_RAW_MATERIALS and len(DEFAULT_RAW_MATERIALS) > 0:
             return pd.DataFrame(DEFAULT_RAW_MATERIALS)
 
-        if "part_type" in bom_default_df.columns and "part_name" in bom_default_df.columns:
+        if bom_df is not None and ("part_type" in bom_df.columns) and ("part_name" in bom_df.columns):
             rw = (
-                bom_default_df.loc[bom_default_df["part_type"].astype(str).str.upper() == "RW", "part_name"]
+                bom_df.loc[bom_df["part_type"].astype(str).str.upper() == "RW", "part_name"]
                 .dropna()
                 .astype(str)
                 .str.strip()
@@ -117,29 +121,26 @@ def rm_df_default(bom_default_df: pd.DataFrame) -> pd.DataFrame:
                 return pd.DataFrame([{"part": p} for p in sorted(set(rw))])
     except Exception:
         pass
+
     return pd.DataFrame(columns=["part"])
 
 
 def ensure_session_defaults():
     if "orders_df" not in st.session_state:
         st.session_state["orders_df"] = pd.DataFrame(DEFAULT_ORDERS)
+
     if "bom_df" not in st.session_state:
         st.session_state["bom_df"] = pd.DataFrame(DEFAULT_BOM)
+
     if "cap_df" not in st.session_state:
         st.session_state["cap_df"] = capacity_df_from_obj(DEFAULT_CAPACITY)
+
     if "raw_df" not in st.session_state:
         st.session_state["raw_df"] = rm_df_default(st.session_state["bom_df"])
-    if "scheduled" not in st.session_state:
-        st.session_state["scheduled"] = None
-    if "work_orders" not in st.session_state:
-        st.session_state["work_orders"] = None
-    if "plan" not in st.session_state:
-        st.session_state["plan"] = None
-    if "fig" not in st.session_state:
-        st.session_state["fig"] = None
 
-
-ensure_session_defaults()
+    for k in ["scheduled", "work_orders", "plan", "fig"]:
+        if k not in st.session_state:
+            st.session_state[k] = None
 
 
 def reset_to_defaults():
@@ -153,17 +154,20 @@ def reset_to_defaults():
     st.session_state["fig"] = None
 
 
+ensure_session_defaults()
+
+
 # --------------------
-# SIDEBAR CONTROLS
+# SIDEBAR
 # --------------------
 with st.sidebar:
     st.header("Controls")
     show_chart = st.toggle("Show Gantt chart", value=True)
-    st.caption("Tip: start with defaults, then tweak capacity and due dates.")
-    run = st.button("Run scheduler", type="primary", use_container_width=True)
-    st.button("Reset inputs to defaults", on_click=reset_to_defaults, use_container_width=True)
 
-    with st.expander("Advanced: export JSON"):
+    run = st.button("Run scheduler", type="primary", use_container_width=True)
+    st.button("Reset inputs", on_click=reset_to_defaults, use_container_width=True)
+
+    with st.expander("Advanced: export current inputs as JSON"):
         st.write("Orders")
         st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
         st.write("BOM")
@@ -175,65 +179,54 @@ with st.sidebar:
 
 
 # --------------------
-# MAIN TABS
+# FLATTENED MAIN TABS
 # --------------------
-tab_inputs, tab_results = st.tabs(["⚙️ Inputs", "📈 Results"])
+tab_orders, tab_bom, tab_cap, tab_rm, tab_results = st.tabs(
+    ["🧾 Orders", "🧩 BOM / Routing", "🏭 Capacity", "🧱 Raw Materials", "📈 Results"]
+)
 
-
-# --------------------
-# INPUTS (WITH SUB-TABS)
-# --------------------
-with tab_inputs:
-    st.markdown("### Inputs")
-    st.markdown('<div class="small-muted">Each tab is an editable table. Add/delete rows like a spreadsheet.</div>', unsafe_allow_html=True)
-    st.divider()
-
-    sub_orders, sub_bom, sub_cap, sub_rm = st.tabs(
-        ["🧾 Orders", "🧩 BOM / Routing", "🏭 Capacity", "🧱 Raw Materials"]
+with tab_orders:
+    st.subheader("Customer orders")
+    st.session_state["orders_df"] = st.data_editor(
+        to_arrow_safe_df(st.session_state["orders_df"]),
+        use_container_width=True,
+        num_rows="dynamic",
+        key="orders_editor",
     )
+    st.caption("Expected fields: order_number, customer, product, quantity, due_date (YYYY-MM-DD).")
 
-    with sub_orders:
-        st.subheader("Customer orders")
-        st.session_state["orders_df"] = st.data_editor(
-            to_arrow_safe_df(st.session_state["orders_df"]),
-            use_container_width=True,
-            num_rows="dynamic",
-            key="orders_editor",
-        )
-        st.caption("Columns expected: order_number, customer, product, quantity, due_date (YYYY-MM-DD).")
+with tab_bom:
+    st.subheader("BOM / routing data")
+    st.session_state["bom_df"] = st.data_editor(
+        to_arrow_safe_df(st.session_state["bom_df"]),
+        use_container_width=True,
+        num_rows="dynamic",
+        height=560,
+        key="bom_editor",
+    )
+    st.caption("Uses your schema. inputs_needed is comma-separated list; stepnumber controls routing order.")
 
-    with sub_bom:
-        st.subheader("BOM / routing data")
-        st.session_state["bom_df"] = st.data_editor(
-            to_arrow_safe_df(st.session_state["bom_df"]),
-            use_container_width=True,
-            num_rows="dynamic",
-            height=520,
-            key="bom_editor",
-        )
-        st.caption("Uses your schema: part_name, inputs_needed (comma-separated), stepnumber, workcenter, batchsize, cycletime, etc.")
+with tab_cap:
+    st.subheader("Work-center capacity")
+    st.session_state["cap_df"] = st.data_editor(
+        to_arrow_safe_df(st.session_state["cap_df"]),
+        use_container_width=True,
+        num_rows="dynamic",
+        height=420,
+        key="cap_editor",
+    )
+    st.caption("Capacity is parallel tools per workcenter (integer).")
 
-    with sub_cap:
-        st.subheader("Work-center capacity")
-        st.session_state["cap_df"] = st.data_editor(
-            to_arrow_safe_df(st.session_state["cap_df"]),
-            use_container_width=True,
-            num_rows="dynamic",
-            height=360,
-            key="cap_editor",
-        )
-        st.caption("Capacity is number of parallel tools/resources available per workcenter.")
-
-    with sub_rm:
-        st.subheader("Raw materials")
-        st.session_state["raw_df"] = st.data_editor(
-            to_arrow_safe_df(st.session_state["raw_df"]),
-            use_container_width=True,
-            num_rows="dynamic",
-            height=320,
-            key="raw_editor",
-        )
-        st.caption("Right now this is a declared list. Next step (optional) is inventory/shortage constraints.")
+with tab_rm:
+    st.subheader("Raw materials")
+    st.session_state["raw_df"] = st.data_editor(
+        to_arrow_safe_df(st.session_state["raw_df"]),
+        use_container_width=True,
+        num_rows="dynamic",
+        height=380,
+        key="raw_editor",
+    )
+    st.caption("Currently a declared list. Next optional upgrade: inventory constraints + shortage checks.")
 
 
 # --------------------
@@ -276,41 +269,54 @@ with tab_results:
     fig = st.session_state.get("fig")
 
     if not scheduled:
-        st.info("Run the scheduler from the sidebar to see results.")
+        st.info("Run the scheduler from the sidebar. Results will show here.")
     else:
-        # Top metrics bar
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        c1.metric("Scheduled rows", len(scheduled))
-        c2.metric("Work orders", len(work_orders) if work_orders else 0)
-        c3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
-
         inferred = plan.get("raw_materials_inferred", []) if plan else []
         declared = plan.get("raw_materials", []) if plan else []
-        c4.metric("Raw materials", f"{len(declared)} declared")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Scheduled rows", len(scheduled))
+        m2.metric("Work orders", len(work_orders) if work_orders else 0)
+        m3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
+        m4.metric("Raw materials", f"{len(declared)} declared")
 
         st.divider()
 
-        # Gantt
+        # GANTT
         if show_chart:
             if fig is not None:
                 st.subheader("Gantt chart")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning("Gantt chart was not generated (fig is None). If you expect one, check scheduler_core chart generation + Plotly dependency.")
+                st.warning("Gantt chart was not generated (fig is None).")
 
-        # Tables
+                with st.expander("Debug Gantt"):
+                    # (1) Confirm plotly exists in this environment
+                    try:
+                        import plotly  # noqa: F401
+                        st.success("plotly import: OK")
+                    except Exception as e:
+                        st.error(f"plotly import failed: {e}")
+
+                    # (2) See if scheduler_core recorded a chart error
+                    if plan and isinstance(plan, dict):
+                        for k in ["chart_error", "gantt_error", "plotly_error"]:
+                            if plan.get(k):
+                                st.error(f"{k}: {plan.get(k)}")
+                        st.write("plan keys (first 60):", sorted(list(plan.keys()))[:60])
+
         st.subheader("Scheduled table")
-        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=440)
+        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=460)
 
         colA, colB = st.columns(2)
         with colA:
-            with st.expander("Work orders", expanded=False):
+            with st.expander("Work orders"):
                 st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=360)
         with colB:
-            with st.expander("Plan ledger", expanded=False):
+            with st.expander("Plan ledger"):
                 st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=360)
 
-        with st.expander("Raw materials (inferred vs declared)", expanded=False):
+        with st.expander("Raw materials (inferred vs declared)"):
             st.write("**Inferred from BOM:**")
             st.code(json.dumps(inferred, indent=2))
             st.write("**Declared:**")
