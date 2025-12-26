@@ -60,6 +60,7 @@ with st.sidebar:
 
 tab_inputs, tab_results, tab_share = st.tabs(["Inputs", "Results", "How to share"])
 
+
 # --------------------
 # INPUTS TAB
 # --------------------
@@ -96,7 +97,9 @@ with tab_inputs:
         label_visibility="collapsed",
     )
 
-    st.info("Tip: keep keys/fields consistent. If JSON is invalid, the run will fail with a helpful error.")
+    st.info(
+        "Tip: keep keys/fields consistent. If JSON is invalid, the run will fail with a helpful error."
+    )
 
 
 # --------------------
@@ -186,16 +189,22 @@ with tab_results:
 # --------------------
 with tab_share:
     st.subheader("Share options (lightweight)")
-    st.markdown(
-        """
-**Option A (easiest): Streamlit Community Cloud**
-1. Put these files in a GitHub repo
-2. In Streamlit Cloud, deploy `app.py`
-3. Share the URL
 
-**Option B (internal): run locally**
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+    st.markdown(
+        "**Option A (easiest): Streamlit Community Cloud**\n"
+        "1. Put these files in a GitHub repo\n"
+        "2. In Streamlit Cloud, deploy `app.py`\n"
+        "3. Share the URL\n\n"
+        "**Option B (internal): run locally**\n"
+        "```bash\n"
+        "python -m venv .venv\n"
+        "source .venv/bin/activate\n"
+        "pip install -r requirements.txt\n"
+        "streamlit run app.py\n"
+        "```\n\n"
+        "**Option C (single binary): PyInstaller**\n"
+        "```bash\n"
+        "pip install pyinstaller\n"
+        "pyinstaller --onefile --noconsole app.py\n"
+        "```"
+    )
