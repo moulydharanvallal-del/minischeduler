@@ -15,22 +15,19 @@ from scheduler_core import (
 st.set_page_config(page_title="Mini Manufacturing Scheduler", layout="wide")
 
 st.title("Mini Manufacturing Scheduler")
-st.caption("Paste/edit JSON inputs, run the scheduler, and share the app with others.")
-
-
-def _parse_json(name: str, txt: str):
-    try:
-        return json.loads(txt)
-    except Exception as e:
-        raise ValueError(f"{name} JSON error: {e}")
+st.caption("Edit inputs as tables, run the scheduler, and share the app with others.")
 
 
 def to_arrow_safe_df(rows):
     """
-    Convert list[dict] to a PyArrow-safe pandas DataFrame
-    (Streamlit uses PyArrow internally for st.dataframe).
+    Convert list[dict] or DataFrame-like objects to a PyArrow-safe pandas DataFrame.
+    Streamlit uses PyArrow internally for st.dataframe/st.data_editor.
     """
-    df = pd.DataFrame(rows or [])
+    if isinstance(rows, pd.DataFrame):
+        df = rows.copy()
+    else:
+        df = pd.DataFrame(rows or [])
+
     if df.empty:
         return df
 
@@ -53,6 +50,58 @@ def to_arrow_safe_df(rows):
     return df
 
 
+def capacity_df_from_obj(cap_obj: dict) -> pd.DataFrame:
+    rows = [{"workcenter": k, "capacity": v} for k, v in (cap_obj or {}).items()]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame([{"workcenter": "", "capacity": 1}])
+    return df
+
+
+def capacity_obj_from_df(df: pd.DataFrame) -> dict:
+    df2 = df.copy()
+    if "workcenter" not in df2.columns or "capacity" not in df2.columns:
+        return {}
+    df2 = df2.dropna(subset=["workcenter"])
+    out = {}
+    for _, r in df2.iterrows():
+        wc = str(r.get("workcenter", "")).strip()
+        if not wc:
+            continue
+        try:
+            cap = int(r.get("capacity", 1))
+        except Exception:
+            cap = 1
+        out[wc] = cap
+    return out
+
+
+def rm_df_default(bom_default_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    If DEFAULT_RAW_MATERIALS is empty, give a nicer starter:
+    - If BOM has part_type == 'RW', prefill those as raw materials.
+    Otherwise, keep empty.
+    """
+    try:
+        if DEFAULT_RAW_MATERIALS and len(DEFAULT_RAW_MATERIALS) > 0:
+            return pd.DataFrame(DEFAULT_RAW_MATERIALS)
+
+        if "part_type" in bom_default_df.columns and "part_name" in bom_default_df.columns:
+            rw = (
+                bom_default_df.loc[bom_default_df["part_type"].astype(str).str.upper() == "RW", "part_name"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+            rw = [p for p in rw if p]
+            if rw:
+                return pd.DataFrame([{"part": p} for p in sorted(set(rw))])
+    except Exception:
+        pass
+    return pd.DataFrame(columns=["part"])
+
+
 with st.sidebar:
     st.header("Run")
     show_chart = st.checkbox("Show Gantt chart", value=True)
@@ -60,46 +109,76 @@ with st.sidebar:
 
 tab_inputs, tab_results, tab_share = st.tabs(["Inputs", "Results", "How to share"])
 
-
 # --------------------
-# INPUTS TAB
+# INPUTS TAB (CLEAN TABLES)
 # --------------------
 with tab_inputs:
-    st.subheader("Customer orders (JSON list)")
-    orders_text = st.text_area(
-        "orders_json",
-        value=json.dumps(DEFAULT_ORDERS, indent=2),
-        height=240,
-        label_visibility="collapsed",
-    )
+    # Build default dataframes (and keep them in session_state so they persist)
+    if "orders_df" not in st.session_state:
+        st.session_state["orders_df"] = pd.DataFrame(DEFAULT_ORDERS)
 
-    st.subheader("BOM / routing data (JSON list)")
-    bom_text = st.text_area(
-        "bom_json",
-        value=json.dumps(DEFAULT_BOM, indent=2),
-        height=320,
-        label_visibility="collapsed",
-    )
+    if "bom_df" not in st.session_state:
+        st.session_state["bom_df"] = pd.DataFrame(DEFAULT_BOM)
 
-    st.subheader("Work-center capacity (JSON object)")
-    cap_text = st.text_area(
-        "capacity_json",
-        value=json.dumps(DEFAULT_CAPACITY, indent=2),
-        height=220,
-        label_visibility="collapsed",
-    )
+    if "cap_df" not in st.session_state:
+        st.session_state["cap_df"] = capacity_df_from_obj(DEFAULT_CAPACITY)
 
-    st.subheader("Raw materials (JSON list)")
-    raw_text = st.text_area(
-        "raw_materials_json",
-        value=json.dumps(DEFAULT_RAW_MATERIALS, indent=2),
-        height=220,
-        label_visibility="collapsed",
-    )
+    if "raw_df" not in st.session_state:
+        st.session_state["raw_df"] = rm_df_default(st.session_state["bom_df"])
 
-    st.info(
-        "Tip: keep keys/fields consistent. If JSON is invalid, the run will fail with a helpful error."
-    )
+    colL, colR = st.columns([1.2, 1])
+
+    with colL:
+        st.subheader("Customer orders")
+        st.session_state["orders_df"] = st.data_editor(
+            to_arrow_safe_df(st.session_state["orders_df"]),
+            use_container_width=True,
+            num_rows="dynamic",
+            key="orders_editor",
+        )
+
+        st.subheader("BOM / routing data")
+        st.session_state["bom_df"] = st.data_editor(
+            to_arrow_safe_df(st.session_state["bom_df"]),
+            use_container_width=True,
+            num_rows="dynamic",
+            height=420,
+            key="bom_editor",
+        )
+
+    with colR:
+        st.subheader("Work-center capacity")
+        st.session_state["cap_df"] = st.data_editor(
+            to_arrow_safe_df(st.session_state["cap_df"]),
+            use_container_width=True,
+            num_rows="dynamic",
+            height=260,
+            key="cap_editor",
+        )
+
+        st.subheader("Raw materials")
+        st.session_state["raw_df"] = st.data_editor(
+            to_arrow_safe_df(st.session_state["raw_df"]),
+            use_container_width=True,
+            num_rows="dynamic",
+            height=220,
+            key="raw_editor",
+        )
+
+        st.info("Tip: edit like a spreadsheet. Use the Advanced section only if you want raw JSON.")
+
+    with st.expander("Advanced: view / paste JSON"):
+        st.write("Customer orders JSON")
+        st.code(json.dumps(st.session_state["orders_df"].to_dict(orient="records"), indent=2))
+
+        st.write("BOM JSON")
+        st.code(json.dumps(st.session_state["bom_df"].to_dict(orient="records"), indent=2))
+
+        st.write("Capacity JSON")
+        st.code(json.dumps(capacity_obj_from_df(st.session_state["cap_df"]), indent=2))
+
+        st.write("Raw materials JSON")
+        st.code(json.dumps(st.session_state["raw_df"].to_dict(orient="records"), indent=2))
 
 
 # --------------------
@@ -107,10 +186,10 @@ with tab_inputs:
 # --------------------
 if run:
     try:
-        orders = _parse_json("Orders", orders_text)
-        bom = _parse_json("BOM", bom_text)
-        capacity = _parse_json("Capacity", cap_text)
-        raw_materials = _parse_json("Raw materials", raw_text)
+        orders = st.session_state["orders_df"].to_dict(orient="records")
+        bom = st.session_state["bom_df"].to_dict(orient="records")
+        capacity = capacity_obj_from_df(st.session_state["cap_df"])
+        raw_materials = st.session_state["raw_df"].to_dict(orient="records")
 
         with st.spinner("Scheduling..."):
             scheduled, work_orders, plan, fig = run_scheduler(
@@ -126,9 +205,7 @@ if run:
         st.session_state["plan"] = plan
         st.session_state["fig"] = fig
 
-        st.success(
-            f"Done. Scheduled runs: {len(scheduled)} | Work orders: {len(work_orders)}"
-        )
+        st.success(f"Done. Scheduled runs: {len(scheduled)} | Work orders: {len(work_orders)}")
 
     except Exception as e:
         st.error(str(e))
@@ -148,14 +225,12 @@ with tab_results:
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("Scheduled rows", len(scheduled))
-        c2.metric("Work orders", len(work_orders))
-        c3.metric("Ledger rows", len(plan.get("ledger", [])))
+        c2.metric("Work orders", len(work_orders) if work_orders else 0)
+        c3.metric("Ledger rows", len(plan.get("ledger", [])) if plan else 0)
 
-        inferred = plan.get("raw_materials_inferred", [])
-        declared = plan.get("raw_materials", [])
-        st.caption(
-            f"Raw materials — inferred from BOM: {len(inferred)} | declared: {len(declared)}"
-        )
+        inferred = plan.get("raw_materials_inferred", []) if plan else []
+        declared = plan.get("raw_materials", []) if plan else []
+        st.caption(f"Raw materials — inferred from BOM: {len(inferred)} | declared: {len(declared)}")
 
         if fig is not None:
             st.plotly_chart(fig, use_container_width=True)
@@ -164,24 +239,16 @@ with tab_results:
             st.write("**Inferred from BOM:**")
             st.code(json.dumps(inferred, indent=2))
             st.write("**Declared:**")
-            st.dataframe(to_arrow_safe_df(declared), use_container_width=True)
+            st.dataframe(to_arrow_safe_df(declared), use_container_width=True, height=220)
 
         st.subheader("Scheduled table")
-        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=320)
+        st.dataframe(to_arrow_safe_df(scheduled), use_container_width=True, height=360)
 
         with st.expander("Work orders"):
-            st.dataframe(
-                to_arrow_safe_df(work_orders),
-                use_container_width=True,
-                height=260,
-            )
+            st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=300)
 
         with st.expander("Plan ledger"):
-            st.dataframe(
-                to_arrow_safe_df(plan.get("ledger", [])),
-                use_container_width=True,
-                height=260,
-            )
+            st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=300)
 
 
 # --------------------
@@ -189,7 +256,6 @@ with tab_results:
 # --------------------
 with tab_share:
     st.subheader("Share options (lightweight)")
-
     st.markdown(
         "**Option A (easiest): Streamlit Community Cloud**\n"
         "1. Put these files in a GitHub repo\n"
