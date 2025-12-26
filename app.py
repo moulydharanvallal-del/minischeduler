@@ -145,125 +145,40 @@ def reset_to_defaults():
     st.session_state["fig"] = None
 
 
-def auto_detect_numeric_time_cols(df: pd.DataFrame):
+def convert_numeric_to_datetime(s: pd.Series, base_dt: dt.datetime, unit: str) -> pd.Series:
+    x = pd.to_numeric(s, errors="coerce")
+    unit_map = {"seconds": "s", "minutes": "m", "hours": "h", "days": "D"}
+    return base_dt + pd.to_timedelta(x, unit=unit_map.get(unit, "m"))
+
+
+def build_gantt(df_in: pd.DataFrame, start_col: str, end_col: str, y_col: str,
+                time_mode: str, unit: str, base_date: dt.date, label_col: str | None):
     """
-    Try to infer start/end numeric time columns.
-    - Prefer columns whose names include: start/end, in/out, input/output, begin/finish.
-    - Otherwise, try to find a pair of numeric columns where (end >= start) for most rows.
-    Returns (start_col, end_col) or (None, None).
+    time_mode:
+      - "datetime": start/end are datetime parseable
+      - "numeric": start/end are numeric offsets (e.g., minutes from 0)
     """
-    if df is None or df.empty:
-        return None, None
-
-    cols = list(df.columns)
-    lower = [c.lower() for c in cols]
-
-    # Name-based candidates
-    start_name_cands = ["start", "begin", "in", "input", "from"]
-    end_name_cands = ["end", "finish", "out", "output", "to"]
-
-    def pick_name(cands):
-        for cand in cands:
-            for i, c in enumerate(lower):
-                if c == cand or cand in c:
-                    return cols[i]
-        return None
-
-    start_col = pick_name(start_name_cands)
-    end_col = pick_name(end_name_cands)
-
-    # If both found and numeric-ish -> done
-    if start_col and end_col:
-        s = pd.to_numeric(df[start_col], errors="coerce")
-        e = pd.to_numeric(df[end_col], errors="coerce")
-        if (s.notna().sum() > 0) and (e.notna().sum() > 0):
-            return start_col, end_col
-
-    # Otherwise brute force numeric pair search
-    numeric_cols = []
-    for c in cols:
-        s = pd.to_numeric(df[c], errors="coerce")
-        if s.notna().mean() > 0.8:  # mostly numeric
-            numeric_cols.append(c)
-
-    best = (None, None, -1.0)
-    for i in range(len(numeric_cols)):
-        for j in range(len(numeric_cols)):
-            if i == j:
-                continue
-            a = numeric_cols[i]
-            b = numeric_cols[j]
-            s = pd.to_numeric(df[a], errors="coerce")
-            e = pd.to_numeric(df[b], errors="coerce")
-            mask = s.notna() & e.notna()
-            if mask.sum() < 5:
-                continue
-            score = (e[mask] >= s[mask]).mean()
-            if score > best[2]:
-                best = (a, b, score)
-
-    if best[2] >= 0.95:  # very likely start/end
-        return best[0], best[1]
-
-    return None, None
-
-
-def auto_detect_resource_col(df: pd.DataFrame):
-    if df is None or df.empty:
-        return None
-    cols = list(df.columns)
-    lower = [c.lower() for c in cols]
-    for cand in ["workcenter", "work_center", "resource", "wc", "machine", "tool"]:
-        for i, c in enumerate(lower):
-            if c == cand or cand in c:
-                return cols[i]
-    return None
-
-
-def to_datetime_from_numeric(series: pd.Series, base_date: dt.datetime, unit: str) -> pd.Series:
-    """
-    Convert numeric offset -> datetime using base_date and a chosen unit.
-    unit: seconds | minutes | hours | days
-    """
-    s = pd.to_numeric(series, errors="coerce")
-    if unit == "seconds":
-        return base_date + pd.to_timedelta(s, unit="s")
-    if unit == "minutes":
-        return base_date + pd.to_timedelta(s, unit="m")
-    if unit == "hours":
-        return base_date + pd.to_timedelta(s, unit="h")
-    if unit == "days":
-        return base_date + pd.to_timedelta(s, unit="D")
-    # default minutes
-    return base_date + pd.to_timedelta(s, unit="m")
-
-
-def build_numeric_gantt(df_in: pd.DataFrame, start_col: str, end_col: str, y_col: str,
-                        base_date: dt.datetime, unit: str, label_col: str | None):
     df = df_in.copy()
 
-    # ensure numeric
-    s_num = pd.to_numeric(df[start_col], errors="coerce")
-    e_num = pd.to_numeric(df[end_col], errors="coerce")
-    df = df.loc[s_num.notna() & e_num.notna()].copy()
+    if time_mode == "datetime":
+        df["_start"] = pd.to_datetime(df[start_col], errors="coerce")
+        df["_end"] = pd.to_datetime(df[end_col], errors="coerce")
+    else:
+        base_dt = dt.datetime.combine(base_date, dt.time(0, 0, 0))
+        df["_start"] = convert_numeric_to_datetime(df[start_col], base_dt, unit)
+        df["_end"] = convert_numeric_to_datetime(df[end_col], base_dt, unit)
 
+    df = df.dropna(subset=["_start", "_end", y_col])
     if df.empty:
-        raise ValueError("No rows had numeric start/end after coercion.")
+        raise ValueError("No rows left after parsing start/end/resource. Check your selected columns.")
 
-    df["_start_dt"] = to_datetime_from_numeric(df[start_col], base_date, unit)
-    df["_end_dt"] = to_datetime_from_numeric(df[end_col], base_date, unit)
-
-    df = df.dropna(subset=["_start_dt", "_end_dt", y_col])
-    if df.empty:
-        raise ValueError("After building datetimes, no rows remained.")
-
-    if not label_col or label_col not in df.columns:
+    if label_col is None or label_col not in df.columns:
         label_col = y_col
 
     fig = px.timeline(
         df,
-        x_start="_start_dt",
-        x_end="_end_dt",
+        x_start="_start",
+        x_end="_end",
         y=y_col,
         hover_data=[label_col] if label_col in df.columns else None,
     )
@@ -281,7 +196,6 @@ with st.sidebar:
     show_chart = st.toggle("Show Gantt chart", value=True)
     run = st.button("Run scheduler", type="primary", use_container_width=True)
     st.button("Reset inputs", on_click=reset_to_defaults, use_container_width=True)
-
 
 # --------------------
 # FLATTENED TABS
@@ -329,9 +243,8 @@ with tab_rm:
         key="raw_editor",
     )
 
-
 # --------------------
-# RUN SCHEDULER
+# RUN
 # --------------------
 if run:
     try:
@@ -359,7 +272,6 @@ if run:
     except Exception as e:
         st.error(str(e))
 
-
 # --------------------
 # RESULTS
 # --------------------
@@ -381,79 +293,71 @@ with tab_results:
 
         st.divider()
 
-        # --------------------
-        # GANTT (core fig OR numeric fallback)
-        # --------------------
-        if show_chart:
-            if fig is not None:
+        # Always show columns + preview so we stop guessing forever
+        with st.expander("Schedule output (columns + preview)", expanded=True):
+            st.write("Columns:", list(df_sched.columns))
+            st.dataframe(df_sched.head(40), use_container_width=True)
+
+        # Gantt: show core if available
+        if show_chart and fig is not None:
+            st.subheader("Gantt chart (from scheduler_core)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Gantt Builder (always available)
+        st.markdown("## Gantt Builder")
+        st.caption("Pick the columns that represent Start/End time and Resource. Works with numeric time buckets like 0→100.")
+
+        cols = list(df_sched.columns)
+        cols_none = ["(none)"] + cols
+
+        # Heuristic default picks (very mild)
+        low = [c.lower() for c in cols]
+        def guess_one(keys):
+            for k in keys:
+                for i, c in enumerate(low):
+                    if c == k or k in c:
+                        return cols[i]
+            return None
+
+        default_start = guess_one(["start", "in", "input", "begin", "from"])
+        default_end = guess_one(["end", "out", "output", "finish", "to"])
+        default_y = guess_one(["workcenter", "work_center", "resource", "wc", "tool", "machine"])
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            start_col = st.selectbox("Start column", cols_none, index=(cols_none.index(default_start) if default_start in cols_none else 0))
+        with c2:
+            end_col = st.selectbox("End column", cols_none, index=(cols_none.index(default_end) if default_end in cols_none else 0))
+        with c3:
+            y_col = st.selectbox("Resource / Workcenter column", cols_none, index=(cols_none.index(default_y) if default_y in cols_none else 0))
+
+        time_mode = st.radio("Time mode", ["numeric", "datetime"], horizontal=True, index=0)
+        unit = st.selectbox("Numeric unit", ["minutes", "seconds", "hours", "days"], index=0)
+        base_date = st.date_input("Base date (numeric mode)", value=dt.date.today())
+        label_col = st.selectbox("Hover label (optional)", cols_none, index=0)
+
+        build = st.button("Build Gantt", type="primary")
+
+        if build:
+            try:
+                if start_col == "(none)" or end_col == "(none)" or y_col == "(none)":
+                    raise ValueError("Select Start, End, and Resource columns.")
+                hover = None if label_col == "(none)" else label_col
+
+                gantt = build_gantt(
+                    df_sched,
+                    start_col=start_col,
+                    end_col=end_col,
+                    y_col=y_col,
+                    time_mode=time_mode,
+                    unit=unit,
+                    base_date=base_date,
+                    label_col=hover,
+                )
                 st.subheader("Gantt chart")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("scheduler_core returned fig=None. Building Gantt from numeric time columns…")
-
-                # Auto detect numeric start/end and resource
-                auto_start, auto_end = auto_detect_numeric_time_cols(df_sched)
-                auto_y = auto_detect_resource_col(df_sched)
-
-                with st.expander("Gantt Builder (auto + manual override)", expanded=True):
-                    st.write("Detected (auto):", {"start": auto_start, "end": auto_end, "resource": auto_y})
-
-                    cols = list(df_sched.columns)
-                    cols_none = ["(none)"] + cols
-
-                    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
-                    with c1:
-                        start_col = st.selectbox("Start (numeric) column", cols_none, index=(cols_none.index(auto_start) if auto_start in cols_none else 0))
-                    with c2:
-                        end_col = st.selectbox("End (numeric) column", cols_none, index=(cols_none.index(auto_end) if auto_end in cols_none else 0))
-                    with c3:
-                        y_col = st.selectbox("Resource / Workcenter column", cols_none, index=(cols_none.index(auto_y) if auto_y in cols_none else 0))
-                    with c4:
-                        label_col = st.selectbox("Hover label (optional)", cols_none, index=0)
-
-                    st.caption("Your example 0→100, 100→190 means these are the two columns to pick for Start/End.")
-
-                    d1, d2 = st.columns([1, 1])
-                    with d1:
-                        unit = st.selectbox("Time unit for numeric columns", ["minutes", "seconds", "hours", "days"], index=0)
-                    with d2:
-                        base = st.date_input("Base date for chart", value=dt.date.today())
-                        base_dt = dt.datetime.combine(base, dt.time(0, 0, 0))
-
-                    show_preview = st.checkbox("Show schedule preview + columns", value=False)
-                    if show_preview:
-                        st.write("Columns:", cols)
-                        st.dataframe(df_sched.head(30), use_container_width=True)
-
-                    build = st.button("Build Gantt", type="primary")
-                    if build:
-                        try:
-                            if start_col == "(none)" or end_col == "(none)" or y_col == "(none)":
-                                raise ValueError("Pick Start, End, and Resource columns.")
-                            hover = None if label_col == "(none)" else label_col
-
-                            gantt = build_numeric_gantt(
-                                df_sched,
-                                start_col=start_col,
-                                end_col=end_col,
-                                y_col=y_col,
-                                base_date=base_dt,
-                                unit=unit,
-                                label_col=hover,
-                            )
-                            st.subheader("Gantt chart (numeric fallback)")
-                            st.plotly_chart(gantt, use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Gantt build failed: {e}")
+                st.plotly_chart(gantt, use_container_width=True)
+            except Exception as e:
+                st.error(f"Gantt build failed: {e}")
 
         st.subheader("Scheduled table")
         st.dataframe(df_sched, use_container_width=True, height=520)
-
-        with st.expander("Work orders"):
-            st.dataframe(to_arrow_safe_df(work_orders), use_container_width=True, height=360)
-
-        with st.expander("Plan ledger"):
-            if plan and isinstance(plan, dict):
-                st.dataframe(to_arrow_safe_df(plan.get("ledger", [])), use_container_width=True, height=360)
-            else:
-                st.info("No plan ledger available.")
